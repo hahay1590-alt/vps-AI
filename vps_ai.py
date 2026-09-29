@@ -30,9 +30,15 @@ except ImportError:
     tomllib = None
 
 
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
+LOCAL_LLM = os.environ.get(
+    "VPS_AI_LOCAL_LLM", "1" if not API_KEY else "0"
+).lower() in {"1", "true", "yes"}
+MODEL = os.environ.get("OPENAI_MODEL", "vps-ai-qwen" if LOCAL_LLM else "gpt-4o-mini")
+BASE_URL = os.environ.get(
+    "OPENAI_BASE_URL",
+    "http://127.0.0.1:11434/v1" if LOCAL_LLM else "https://api.openai.com/v1",
+).rstrip("/")
 ALLOWED_RESTARTS = {
     item.strip()
     for item in os.environ.get("VPS_AI_RESTART_ALLOWLIST", "").split(",")
@@ -298,10 +304,13 @@ def ask_model(messages, include_tools=True):
     if include_tools:
         request_body.update({"tools": TOOLS, "tool_choice": "auto"})
     payload = json.dumps(request_body).encode()
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
     request = urllib.request.Request(
         f"{BASE_URL}/chat/completions",
         data=payload,
-        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -902,9 +911,9 @@ def investigate_failure(unit, state):
     if automatic_restart_allowed(unit):
         recovery = run_restart(unit, automatic=True)
         recovery += f" Current service state: {service_state(unit)}."
-    if not API_KEY:
+    if not API_KEY and not LOCAL_LLM:
         logging.error(
-            "Service incident: %s (%s). %s\nAI diagnosis disabled (no API key); no data was sent externally.\nRecent local journal:\n%s",
+            "Service incident: %s (%s). %s\nAI diagnosis disabled; no local model is enabled and no data was sent externally.\nRecent local journal:\n%s",
             unit, state, recovery, logs[:8000],
         )
         notify_terminals(f"Service {unit} is {state}. {recovery}")
@@ -1068,10 +1077,15 @@ def main():
     parser = argparse.ArgumentParser(description="Interactive VPS AI helper or lightweight systemd service watcher.")
     parser.add_argument("--watch", action="store_true", help="monitor configured services and diagnose new incidents")
     args = parser.parse_args()
-    if not API_KEY and not args.watch:
-        print("Set OPENAI_API_KEY before starting. See README.md for setup.", file=sys.stderr)
+    if not API_KEY and not LOCAL_LLM and not args.watch:
+        print("Set OPENAI_API_KEY or enable VPS_AI_LOCAL_LLM. See README.md for setup.", file=sys.stderr)
         return 2
-    if API_KEY and not BASE_URL.startswith(("https://", "http://")):
+    if LOCAL_LLM:
+        endpoint = urlsplit(BASE_URL)
+        if endpoint.scheme != "http" or endpoint.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            print("Keyless local LLM mode requires an http:// loopback OPENAI_BASE_URL.", file=sys.stderr)
+            return 2
+    elif API_KEY and not BASE_URL.startswith(("https://", "http://")):
         print("OPENAI_BASE_URL must start with http:// or https://.", file=sys.stderr)
         return 2
 
@@ -1086,9 +1100,15 @@ def main():
             logging.info("Watcher stopped.")
         return 0
 
-    print("VPS AI helper. Type /exit to quit. Tool results are sent to the configured AI provider.")
+    if LOCAL_LLM:
+        print("Local VPS AI helper. No API key; chat and incident logs stay on this VPS. Type /exit to quit.")
+    else:
+        print("VPS AI helper. Type /exit to quit. Tool results are sent to the configured AI provider.")
     print(f"Model: {MODEL} | Restart allowlist: {', '.join(sorted(ALLOWED_RESTARTS)) or '(empty)'}")
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system_prompt = SYSTEM_PROMPT
+    if LOCAL_LLM:
+        system_prompt += "\nYou are running locally without system tools. Diagnose only from details the user provides; never claim to have inspected or changed the VPS."
+    messages = [{"role": "system", "content": system_prompt}]
     while True:
         try:
             user_text = input("\nYou> ").strip()
@@ -1102,7 +1122,7 @@ def main():
         messages.append({"role": "user", "content": user_text})
         try:
             for _ in range(5):
-                assistant = ask_model(messages)
+                assistant = ask_model(messages, include_tools=not LOCAL_LLM)
                 messages.append(assistant)
                 tool_calls = assistant.get("tool_calls") or []
                 if not tool_calls:

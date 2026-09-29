@@ -2,29 +2,78 @@
 
 ## VPS AI helper
 
-`vps_ai.py --watch` is a keyless, rule-based Linux service monitor. It uses local
-systemd checks, writes incidents and recent logs to the local system journal, and can
-automatically restart explicitly allowlisted services. It does not need an API key,
-download a model, or send data off the VPS. This mode is not AI: without an API key,
-it cannot interpret arbitrary errors or invent safe repairs. The separate interactive
-chat mode uses an OpenAI-compatible API and requires a key. The watcher can also
-periodically syntax-check configured project directories without an API key.
+`vps_ai.py --watch` uses local systemd and protocol checks and can use a small local
+Ollama model to explain incidents without an API key or sending logs off the VPS. It can
+automatically restart only explicitly allowlisted services. The local model is a compact
+helper, not a guarantee of correct diagnosis or safe code/config edits. The optional
+interactive chat can also use this local model; hosted API use remains optional.
 
-### Run it
+### Modes
 
-To use interactive AI chat, set your API credentials and run:
+### Local model (no API key)
+
+First run the `scp` and `ssh` commands in “Push and install on your VPS” below. Then,
+in the VPS SSH session, install Ollama, install the copied model definition, and create
+the small Qwen 0.5B model:
 
 ```sh
-export OPENAI_API_KEY='your-provider-key'
-export OPENAI_MODEL='gpt-4o-mini'
+curl -fsSL https://ollama.com/install.sh | sh
+sudo install -d -m 0755 /opt/vps-ai
+sudo install -m 0644 /tmp/Modelfile /opt/vps-ai/Modelfile
+ollama pull qwen2.5:0.5b
+ollama create vps-ai-qwen -f /opt/vps-ai/Modelfile
+```
+
+Ollama normally runs as a local service. Limit parallel work and unload the model soon
+after use:
+
+```sh
+sudo systemctl edit ollama.service
+```
+
+Add this override, then reload and restart Ollama:
+
+```ini
+[Service]
+Environment="OLLAMA_NUM_PARALLEL=1"
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
+Environment="OLLAMA_KEEP_ALIVE=1m"
+MemoryMax=1536M
+CPUQuota=50%
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl restart ollama.service
+```
+
+The model definition limits context to 2,048 tokens and replies to 256 tokens. Model
+files need roughly 400 MB of disk; inference temporarily uses substantially more RAM
+than the file size and CPU can be busy while generating. The Ollama unit cap is 1.5 GB
+RAM and 50% CPU; adjust the cap if your VPS has less available memory. `OLLAMA_KEEP_ALIVE`
+unloads the model after a minute without requests. Checks happen locally; with the
+model installed, incidents are diagnosed locally. With no key and no Ollama service,
+monitoring and automatic allowlisted restarts still run, but diagnosis is logged as
+unavailable.
+
+For interactive local chat from a shell, set:
+
+```sh
+export VPS_AI_LOCAL_LLM=1
+export OPENAI_MODEL=vps-ai-qwen
 python3 vps_ai.py
 ```
 
-Python 3.9+ and a Linux system with systemd are expected. The default API URL is
-`https://api.openai.com/v1`. For another OpenAI-compatible provider, set
-`OPENAI_BASE_URL` to its API base URL and set `OPENAI_MODEL` to a model that supports
-tool calling. Keep the API key in your shell environment or a protected secret manager;
-do not put it in this repository.
+The local assistant can discuss details you provide, but does not get tools to inspect
+the host or execute shell commands. The persistent watcher supplies its own bounded
+diagnostic evidence to the local model.
+
+### Optional hosted model
+
+To use an OpenAI-compatible hosted model instead, set `OPENAI_API_KEY`, `OPENAI_MODEL`,
+and optionally `OPENAI_BASE_URL`. Keep credentials in a protected environment file,
+never in this repository. The keyless local mode is loopback-only and rejects remote
+model URLs.
 
 ### Push and install on your VPS
 
@@ -32,7 +81,7 @@ From this workspace terminal, replace `YOUR_USER` and `YOUR_VPS_IP` with your SS
 and server address. Copy the script and service unit to your VPS:
 
 ```sh
-scp vps_ai.py vps-ai-watch.service YOUR_USER@YOUR_VPS_IP:/tmp/
+scp vps_ai.py vps-ai-watch.service Modelfile YOUR_USER@YOUR_VPS_IP:/tmp/
 ssh YOUR_USER@YOUR_VPS_IP
 ```
 
@@ -51,6 +100,8 @@ sudoedit /etc/vps-ai.env
 Put configuration like this in `/etc/vps-ai.env`, replacing the example services:
 
 ```ini
+VPS_AI_LOCAL_LLM=1
+OPENAI_MODEL=vps-ai-qwen
 VPS_AI_WATCHLIST=nginx.service,myapp.service
 VPS_AI_AUTO_RESTART_ALLOWLIST=myapp.service
 VPS_AI_POLL_SECONDS=60
