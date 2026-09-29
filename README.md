@@ -86,6 +86,77 @@ every language or every semantic/type checker; TypeScript, C#, Swift, and Kotlin
 currently not validated. Install toolchains separately only if you need them. The
 watcher reports problems; it does not rewrite source or claim to automatically fix code.
 
+### VPN and port checks
+
+VPN checks are opt-in; add only the setting for the VPN software actually installed.
+Examples:
+
+```ini
+# WireGuard interface and optional fresh-handshake requirement
+VPS_AI_WIREGUARD_INTERFACES=wg0
+VPS_AI_WIREGUARD_MAX_HANDSHAKE_AGE=300
+
+# OpenVPN systemd unit; also add it to VPS_AI_WATCHLIST for restart eligibility
+VPS_AI_OPENVPN_UNITS=openvpn-client@client.service
+
+# Require at least one active strongSwan IPsec security association
+VPS_AI_IPSEC_MIN_SAS=1
+
+# Optional local status checks for these VPN products
+VPS_AI_TAILSCALE_CHECK=1
+VPS_AI_ZEROTIER_NETWORK_IDS=0123456789abcdef
+```
+
+WireGuard checks the configured interface and can optionally require a recent peer handshake.
+Only set `VPS_AI_WIREGUARD_MAX_HANDSHAKE_AGE` when peers send traffic or use persistent
+keepalive; an idle peer may not handshake recently. OpenVPN checks the named systemd
+units and recent journal lines for TLS/authentication/transport failures, with a later
+successful initialization clearing an earlier log error. IPsec checks
+the number of active strongSwan SAs against `VPS_AI_IPSEC_MIN_SAS`. Tailscale checks its
+local backend/health status. ZeroTier checks each configured network ID. These use the
+protocol's local status tool and do not send credentials or tunnel keys to the monitor.
+
+`VPS_AI_EXPECT_LISTENING` checks local TCP/UDP sockets only; it cannot see a cloud
+firewall, provider security group, or remote NAT. `VPS_AI_TCP_CHECKS` uses
+`INTERFACE|HOST|PORT` entries to attempt a TCP connection, optionally bound to a VPN
+interface. A successful TCP connect proves only that a TCP port answered, not that a
+VPN or TLS handshake succeeded. Generic UDP reachability cannot prove a protocol
+handshake; WireGuard uses its own latest-handshake status instead.
+
+For the named SSH/proxy stacks, optional examples are:
+
+```ini
+# Verify an SSH server returns an SSH-2.0 banner
+VPS_AI_SSH_CHECKS=127.0.0.1:22
+
+# Check local TCP/UDP listeners, including an SSH, OpenVPN, or UDPGW port
+VPS_AI_EXPECT_LISTENING=TCP:22,UDP:7300
+
+# Perform a WebSocket Upgrade; wss:// also validates the TLS certificate
+VPS_AI_WEBSOCKET_CHECKS=wss://proxy.example.com:443/ws
+
+# Validate common proxy server configs with their installed native checkers
+VPS_AI_PROXY_CONFIGS=xray|/etc/xray/config.json,v2ray|/etc/v2ray/config.json,sing-box|/etc/sing-box/config.json
+VPS_AI_SSH_CONFIGS=/etc/ssh/sshd_config
+```
+
+Xray, V2Ray, and sing-box config tests cover configured inbounds such as Trojan,
+VMess, VLESS, Shadowsocks, and WebSocket transports when those protocols are defined
+in those configs. The checker does not create a client login or verify a credentialed
+end-to-end proxy session. A standalone proxy implementation without a recognized
+native config-test command is not automatically understood. OpenVPN, WireGuard,
+strongSwan IPsec, Tailscale, and ZeroTier use their own local status interfaces as
+described above. Add only checks matching software and ports actually in use; UDPGW is
+checked as a configured local UDP listener, not as a VPN handshake.
+
+New incidents and recoveries are written to the journal and sent with `wall` to logged-
+in terminals. This is best-effort: a terminal with `mesg n`, no active login, or a
+restricted `wall` command may not display the alert. Alerts are deduplicated until the
+check recovers. Probes run at the configured poll interval (60 seconds by default), so
+this is near-real-time polling, not packet-level detection. There is no universal checker
+for every proprietary VPN or protocol; unconfigured protocols are not inferred or
+claimed healthy.
+
 `systemctl enable --now` keeps the watcher running after SSH/admin logout, restarts it
 if the watcher process fails, and starts it again after VPS reboot. Stop it with
 `sudo systemctl disable --now vps-ai-watch.service`. Keep `/etc/vps-ai.env` root-readable
